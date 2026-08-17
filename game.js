@@ -461,6 +461,7 @@ const state = {
   confetti:[],
   tasksOpen:false,
   musicOn:false, musicPrompt:false, musicVol:2,
+  pendingJingle:0,
   napFade:0,
   interaction:null,      // {task, obj, t, dur}
   finaleStep:0,
@@ -813,9 +814,20 @@ canvas.addEventListener('pointerdown', (e) => {
   const y = (e.clientY - r.top) / scale;
   handleTap(x, y);
 });
-// some browsers only unlock audio on the *release* of the first tap
-canvas.addEventListener('pointerup', () => { audio(); }, {passive:true});
-canvas.addEventListener('touchend', () => { audio(); }, {passive:true});
+// Bulletproof audio unlock: browsers disagree on which gesture counts, so we
+// try them all, and play a one-sample silent buffer inside the gesture — the
+// canonical trick that flips iOS's audio hardware to "on".
+function unlockAudio() {
+  const ac = audio(); if (!ac || ac.state === 'running') return;
+  ac.resume().catch(()=>{});
+  try {
+    const s = ac.createBufferSource();
+    s.buffer = ac.createBuffer(1, 1, 22050);
+    s.connect(ac.destination); s.start(0);
+  } catch(e){}
+}
+['pointerdown','pointerup','touchstart','touchend','click','keydown'].forEach(ev =>
+  window.addEventListener(ev, unlockAudio, {passive:true}));
 
 /* ---------- keyboard (desktop): WASD/arrows to move, E/Space to interact ---------- */
 const KEYS = {};
@@ -835,7 +847,7 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   audio();
   if (state.scene !== 'game') {
-    if (state.scene==='menu') { setScene('game'); startJingle(); }
+    if (state.scene==='menu') { setScene('game'); state.pendingJingle = performance.now(); }
     else if (state.scene==='aspiration' && state.sceneT>1.2) { setScene('birthday'); birthdayJingle(); }
     else if (state.scene==='birthday' && state.sceneT>2) burstConfetti(24);
     return;
@@ -901,7 +913,7 @@ function handleTap(x, y) {
     if (doneCount()>0 && onReset) {
       state.done = {}; saveGame(); stopMusic(); chime(); return;
     }
-    setScene('game'); startJingle(); return;
+    setScene('game'); state.pendingJingle = performance.now(); unlockAudio(); return;
   }
   if (state.scene === 'aspiration') {
     if (state.sceneT > 1.2) { setScene('birthday'); birthdayJingle(); }
@@ -1899,6 +1911,12 @@ function drawResetPill() {
 
 function frame(now) {
   const dt = Math.min(0.05, (now-last)/1000); last = now;
+  // the start-of-day flourish is owed from tap-to-start: play it the moment
+  // the audio context is actually awake (iOS wakes it just after the tap)
+  if (state.pendingJingle) {
+    if (AC && AC.state === 'running') { state.pendingJingle = 0; startJingle(); }
+    else if (now - state.pendingJingle > 2500) state.pendingJingle = 0;  // too late to feel connected — skip it
+  }
   update(dt);
   ctx.clearRect(0,0,VW,VH);
   rect(0,0,VW,VH,'#1b1526');
