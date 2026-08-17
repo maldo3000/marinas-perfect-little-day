@@ -460,7 +460,7 @@ const state = {
   toasts:[],
   confetti:[],
   tasksOpen:false,
-  musicOn:false, musicPrompt:false, musicVol:3,
+  musicOn:false, musicPrompt:false, musicVol:2,
   napFade:0,
   interaction:null,      // {task, obj, t, dur}
   finaleStep:0,
@@ -613,8 +613,18 @@ function floatSym(x, y, sym) {
    Audio (tiny WebAudio synth)
    ========================================================= */
 let AC = null;
+let SFX = null;   // master gain for sound effects, so they sit above the music
 function audio() {
-  if (!AC) { try { AC = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){} }
+  if (!AC) {
+    try {
+      AC = new (window.AudioContext||window.webkitAudioContext)();
+      SFX = AC.createGain();
+      SFX.gain.value = 1.7;          // lift the little blips over the soundtrack
+      SFX.connect(AC.destination);
+    } catch(e){}
+    // iOS: play through the media channel so the silent switch doesn't mute effects
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
+  }
   if (AC && AC.state==='suspended') AC.resume();
   return AC;
 }
@@ -625,7 +635,7 @@ function beep(freq, t0, dur, vol, type) {
   g.gain.setValueAtTime(0, ac.currentTime + t0);
   g.gain.linearRampToValueAtTime(vol, ac.currentTime + t0 + 0.02);
   g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + t0 + dur);
-  o.connect(g); g.connect(ac.destination);
+  o.connect(g); g.connect(SFX || ac.destination);
   o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + 0.05);
 }
 function chime(){ beep(660,0,0.12,0.12); beep(880,0.09,0.16,0.12); beep(1320,0.18,0.25,0.10); }
@@ -654,13 +664,26 @@ function stopMusic() {
   if (music && !music.paused) music.pause();
   state.musicOn = false;
 }
-function musicVolume() { return state.musicVol/5 * 0.9; }
+// music sits *under* the effects: level 1–5 maps to a gentle 0.08–0.40
+function musicVolume() { return 0.08 + (state.musicVol-1)/4 * 0.32; }
 /* little on/off + volume popup shown above the stereo */
 function musicPopRect() {
-  const w = 128, h = 82;
+  const w = 140, h = 88;
   const cx = px(7)+12;
   return { x0: cx-w/2, y0: py(10)-h-14, w, h, cx };
 }
+// tap zones inside the popup, so drawing and hit-testing can't drift apart
+function musicZones() {
+  const {x0, y0, w} = musicPopRect();
+  return {
+    on:    {x: x0+10,  y: y0+24, w: 55, h: 20},
+    off:   {x: x0+75,  y: y0+24, w: 55, h: 20},
+    minus: {x: x0+10,  y: y0+54, w: 26, h: 24},
+    plus:  {x: x0+104, y: y0+54, w: 26, h: 24},
+    pips:  {x: x0+42,  y: y0+54, w: 56, h: 24},
+  };
+}
+const inZone = (z, x, y) => x>=z.x && x<=z.x+z.w && y>=z.y && y<=z.y+z.h;
 function drawMusicPrompt() {
   const {x0, y0, w, h, cx} = musicPopRect();
   rect(x0-2, y0-2, w+4, h+4, '#141021');
@@ -668,22 +691,29 @@ function drawMusicPrompt() {
   rect(x0, y0, w, 3, '#f28cbe');
   rect(cx-4, y0+h, 8, 5, '#241c36');                       // nub pointing at the stereo
   text('♪ music?', cx, y0+13, 10, '#f2b8d8', 'center', true);
-  const onSel = state.musicOn;
-  rect(x0+10, y0+24, 50, 20, onSel ? '#1e3a1e' : '#3a3350');
+  const z = musicZones(), onSel = state.musicOn;
+  // on / off
+  rect(z.on.x, z.on.y, z.on.w, z.on.h, onSel ? '#1e3a1e' : '#3a3350');
   ctx.strokeStyle = onSel ? C.green : '#4d4570'; ctx.lineWidth = 1.5;
-  ctx.strokeRect(x0+10.5, y0+24.5, 49, 19);
-  text('on', x0+35, y0+34, 10, onSel ? C.greenLight : C.text, 'center', true);
-  rect(x0+68, y0+24, 50, 20, !onSel ? '#3a2430' : '#3a3350');
+  ctx.strokeRect(z.on.x+0.5, z.on.y+0.5, z.on.w-1, z.on.h-1);
+  text('on', z.on.x+z.on.w/2, z.on.y+10, 10, onSel ? C.greenLight : C.text, 'center', true);
+  rect(z.off.x, z.off.y, z.off.w, z.off.h, !onSel ? '#3a2430' : '#3a3350');
   ctx.strokeStyle = !onSel ? '#f28cbe' : '#4d4570';
-  ctx.strokeRect(x0+68.5, y0+24.5, 49, 19);
-  text('off', x0+93, y0+34, 10, !onSel ? '#f2b8d8' : C.text, 'center', true);
-  // volume: five stepped bars, tap to set
-  text('vol', x0+24, y0+62, 9, '#f2b8d8', 'center', true);
+  ctx.strokeRect(z.off.x+0.5, z.off.y+0.5, z.off.w-1, z.off.h-1);
+  text('off', z.off.x+z.off.w/2, z.off.y+10, 10, !onSel ? '#f2b8d8' : C.text, 'center', true);
+  // volume: clear − and + buttons with a five-pip level readout
+  const stepBtn = (zz, label, enabled) => {
+    rect(zz.x, zz.y, zz.w, zz.h, enabled ? '#3a3350' : '#2a2440');
+    ctx.strokeStyle = enabled ? '#f28cbe' : '#3a3350'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(zz.x+0.5, zz.y+0.5, zz.w-1, zz.h-1);
+    text(label, zz.x+zz.w/2, zz.y+zz.h/2, 15, enabled ? '#f2b8d8' : '#544c72', 'center', true);
+  };
+  stepBtn(z.minus, '−', state.musicVol > 1);
+  stepBtn(z.plus,  '+', state.musicVol < 5);
   for (let i=0;i<5;i++) {
     const lit = i < state.musicVol;
-    const bh2 = 6 + i*2.5;
-    rect(x0+46+i*15, y0+68-bh2, 12, bh2, lit ? (i>=3? C.greenLight : C.green) : '#3a3350');
-    if (lit) rect(x0+46+i*15, y0+68-bh2, 12, 2, 'rgba(255,255,255,0.4)');
+    rect(z.pips.x+i*11, z.pips.y+7, 8, 10, lit ? C.green : '#3a3350');
+    if (lit) rect(z.pips.x+i*11, z.pips.y+7, 8, 3, C.greenLight);
   }
 }
 function fanfare(){ [523,659,784,1047].forEach((f,i)=>beep(f,i*0.12,0.3,0.13)); }
@@ -816,16 +846,20 @@ function handleTap(x, y) {
   if (state.interaction) return;
   // music popup: pick on/off (closes), or tap a volume bar (stays open)
   if (state.musicPrompt) {
-    const {x0, y0} = musicPopRect();
-    if (y>=y0+50 && y<=y0+72 && x>=x0+44 && x<=x0+122) {
-      const lvl = Math.min(5, Math.max(1, Math.floor((x-(x0+46))/15)+1));
-      state.musicVol = lvl;
-      if (music) music.volume = musicVolume();
-      beep(320+lvl*110, 0, 0.09, 0.09);
+    const z = musicZones();
+    // − / + step the volume and keep the popup open
+    if (inZone(z.minus, x, y) || inZone(z.plus, x, y)) {
+      const dir = inZone(z.plus, x, y) ? 1 : -1;
+      const nv = Math.min(5, Math.max(1, state.musicVol + dir));
+      if (nv !== state.musicVol) {
+        state.musicVol = nv;
+        if (music) music.volume = musicVolume();
+        beep(320 + nv*110, 0, 0.08, 0.10);
+      }
       return;
     }
-    if (x>=x0+10 && x<=x0+60 && y>=y0+24 && y<=y0+44) setMusic(true);
-    else if (x>=x0+68 && x<=x0+118 && y>=y0+24 && y<=y0+44) setMusic(false);
+    if (inZone(z.on, x, y)) setMusic(true);
+    else if (inZone(z.off, x, y)) setMusic(false);
     state.musicPrompt = false;
     return;
   }
@@ -869,7 +903,11 @@ function handleTap(x, y) {
   }
 }
 
-function setScene(s) { state.scene = s; state.sceneT = 0; if (s==='birthday') { state.confetti=[]; burstConfetti(80); } }
+function setScene(s) {
+  state.scene = s; state.sceneT = 0;
+  // the finale belongs to the birthday song — hush the stereo
+  if (s==='birthday') { stopMusic(); state.confetti=[]; burstConfetti(80); }
+}
 
 /* =========================================================
    Update
