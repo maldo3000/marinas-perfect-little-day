@@ -655,31 +655,41 @@ function duck(depth = 0.3, hold = 0.22) {
 }
 function beep(freq, t0, dur, vol, type) {
   const ac = audio(); if (!ac) return;
-  const o = ac.createOscillator(), g = ac.createGain();
-  o.type = type||'triangle'; o.frequency.value = freq;
-  g.gain.setValueAtTime(0, ac.currentTime + t0);
-  g.gain.linearRampToValueAtTime(vol, ac.currentTime + t0 + 0.02);
-  g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + t0 + dur);
-  o.connect(g); g.connect(SFX || ac.destination);
-  o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + 0.05);
+  const go = () => {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type||'triangle'; o.frequency.value = freq;
+    g.gain.setValueAtTime(0, ac.currentTime + t0);
+    g.gain.linearRampToValueAtTime(vol, ac.currentTime + t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + t0 + dur);
+    o.connect(g); g.connect(SFX || ac.destination);
+    o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + 0.05);
+  };
+  // never schedule against a frozen clock: on the very first tap the context
+  // may still be waking up — play the note the moment it's actually running
+  if (ac.state === 'running') go();
+  else ac.resume().then(go).catch(()=>{});
 }
 function chime(){ duck(); beep(660,0,0.12,0.12); beep(880,0.09,0.16,0.12); beep(1320,0.18,0.25,0.10); }
 /* soft, slow breathing while she naps */
 function snore() {
   const ac = audio(); if (!ac) return;
-  duck(0.45, 0.6);
-  const t = ac.currentTime;
-  const o = ac.createOscillator(), g = ac.createGain();
-  o.type = 'sine';
-  o.frequency.setValueAtTime(68, t);
-  o.frequency.linearRampToValueAtTime(104, t+0.5);
-  o.frequency.linearRampToValueAtTime(62, t+1.15);
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(0.17, t+0.45);
-  g.gain.linearRampToValueAtTime(0.0001, t+1.2);
-  o.connect(g); g.connect(SFX || ac.destination);
-  o.start(t); o.stop(t+1.25);
-  beep(1750, 0.15, 0.5, 0.012, 'sine');      // faint airy 'zzz' on top
+  const go = () => {
+    duck(0.45, 0.6);
+    const t = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(68, t);
+    o.frequency.linearRampToValueAtTime(104, t+0.5);
+    o.frequency.linearRampToValueAtTime(62, t+1.15);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.17, t+0.45);
+    g.gain.linearRampToValueAtTime(0.0001, t+1.2);
+    o.connect(g); g.connect(SFX || ac.destination);
+    o.start(t); o.stop(t+1.25);
+    beep(1750, 0.15, 0.5, 0.012, 'sine');    // faint airy 'zzz' on top
+  };
+  if (ac.state === 'running') go();
+  else ac.resume().then(go).catch(()=>{});
 }
 /* cheerful little flourish when the day begins */
 function startJingle() {
@@ -803,6 +813,9 @@ canvas.addEventListener('pointerdown', (e) => {
   const y = (e.clientY - r.top) / scale;
   handleTap(x, y);
 });
+// some browsers only unlock audio on the *release* of the first tap
+canvas.addEventListener('pointerup', () => { audio(); }, {passive:true});
+canvas.addEventListener('touchend', () => { audio(); }, {passive:true});
 
 /* ---------- keyboard (desktop): WASD/arrows to move, E/Space to interact ---------- */
 const KEYS = {};
