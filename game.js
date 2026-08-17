@@ -613,20 +613,45 @@ function floatSym(x, y, sym) {
    Audio (tiny WebAudio synth)
    ========================================================= */
 let AC = null;
-let SFX = null;   // master gain for sound effects, so they sit above the music
+/* One mixer for everything: effects and music share a single AudioContext, so
+   the browser can't duck one against the other. Effects also sidechain the
+   music down for a moment so they always cut through. */
+let SFX = null, MUSIC_GAIN = null, musicSrc = null;
 function audio() {
   if (!AC) {
     try {
       AC = new (window.AudioContext||window.webkitAudioContext)();
-      SFX = AC.createGain();
-      SFX.gain.value = 1.7;          // lift the little blips over the soundtrack
+      SFX = AC.createGain(); SFX.gain.value = 2.2;
       SFX.connect(AC.destination);
+      MUSIC_GAIN = AC.createGain(); MUSIC_GAIN.gain.value = musicVolume();
+      MUSIC_GAIN.connect(AC.destination);
     } catch(e){}
     // iOS: play through the media channel so the silent switch doesn't mute effects
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
   }
   if (AC && AC.state==='suspended') AC.resume();
   return AC;
+}
+// route the <audio> element into our graph (once), so one gain rules the music
+function wireMusic() {
+  const ac = audio();
+  if (!ac || !music || musicSrc || !MUSIC_GAIN) return;
+  try {
+    musicSrc = ac.createMediaElementSource(music);
+    musicSrc.connect(MUSIC_GAIN);
+    music.volume = 1;                 // level now lives on MUSIC_GAIN
+    MUSIC_GAIN.gain.value = musicVolume();
+  } catch(e) { /* fall back to element volume */ }
+}
+// briefly dip the music so a sound effect is never buried
+function duck(depth = 0.3, hold = 0.22) {
+  if (!AC || !MUSIC_GAIN || !state.musicOn) return;
+  const g = MUSIC_GAIN.gain, now = AC.currentTime, base = musicVolume();
+  g.cancelScheduledValues(now);
+  g.setValueAtTime(g.value, now);
+  g.linearRampToValueAtTime(base*depth, now + 0.05);
+  g.setValueAtTime(base*depth, now + 0.05 + hold);
+  g.linearRampToValueAtTime(base, now + 0.05 + hold + 0.3);
 }
 function beep(freq, t0, dur, vol, type) {
   const ac = audio(); if (!ac) return;
@@ -638,7 +663,34 @@ function beep(freq, t0, dur, vol, type) {
   o.connect(g); g.connect(SFX || ac.destination);
   o.start(ac.currentTime + t0); o.stop(ac.currentTime + t0 + dur + 0.05);
 }
-function chime(){ beep(660,0,0.12,0.12); beep(880,0.09,0.16,0.12); beep(1320,0.18,0.25,0.10); }
+function chime(){ duck(); beep(660,0,0.12,0.12); beep(880,0.09,0.16,0.12); beep(1320,0.18,0.25,0.10); }
+/* soft, slow breathing while she naps */
+function snore() {
+  const ac = audio(); if (!ac) return;
+  duck(0.45, 0.6);
+  const t = ac.currentTime;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(68, t);
+  o.frequency.linearRampToValueAtTime(104, t+0.5);
+  o.frequency.linearRampToValueAtTime(62, t+1.15);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.17, t+0.45);
+  g.gain.linearRampToValueAtTime(0.0001, t+1.2);
+  o.connect(g); g.connect(SFX || ac.destination);
+  o.start(t); o.stop(t+1.25);
+  beep(1750, 0.15, 0.5, 0.012, 'sine');      // faint airy 'zzz' on top
+}
+/* cheerful little flourish when the day begins */
+function startJingle() {
+  duck(0.25, 0.5);
+  [523.25, 659.25, 783.99, 1046.5].forEach((f,i) => {
+    beep(f, i*0.085, 0.30, 0.13, 'triangle');
+    beep(f*2, i*0.085, 0.16, 0.04, 'sine');
+  });
+  beep(1318.5, 0.34, 0.55, 0.11, 'triangle');
+  beep(659.25, 0.34, 0.55, 0.06, 'sine');
+}
 
 /* ---------- music (optional, via the little stereo) ---------- */
 const MUSIC_SRC = (window.MARINA_ASSETS && window.MARINA_ASSETS.music) || 'assets/music.m4a';
@@ -646,12 +698,16 @@ let music = null;
 function setMusic(on) {
   if (on) {
     if (!music) {
-      music = new Audio(MUSIC_SRC);
+      music = new Audio();
+      music.crossOrigin = 'anonymous';   // must precede src for the graph hookup
+      music.src = MUSIC_SRC;
       music.loop = true;
       music.volume = musicVolume();
     }
+    wireMusic();
     if (music.paused) music.play().catch(()=>{});
     state.musicOn = true;
+    applyMusicVolume();
     addToast('music on', '🎵');
   } else {
     if (music) music.pause();
@@ -659,6 +715,13 @@ function setMusic(on) {
     addToast('music off', '🔇');
   }
   chime();
+}
+function applyMusicVolume() {
+  if (MUSIC_GAIN && musicSrc) {
+    // clear any in-flight duck ramp so the new level takes effect cleanly
+    if (AC) MUSIC_GAIN.gain.cancelScheduledValues(AC.currentTime);
+    MUSIC_GAIN.gain.value = musicVolume();
+  } else if (music) music.volume = musicVolume();
 }
 function stopMusic() {
   if (music && !music.paused) music.pause();
@@ -759,7 +822,7 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault();
   audio();
   if (state.scene !== 'game') {
-    if (state.scene==='menu') { setScene('game'); chime(); }
+    if (state.scene==='menu') { setScene('game'); startJingle(); }
     else if (state.scene==='aspiration' && state.sceneT>1.2) { setScene('birthday'); birthdayJingle(); }
     else if (state.scene==='birthday' && state.sceneT>2) burstConfetti(24);
     return;
@@ -825,7 +888,7 @@ function handleTap(x, y) {
     if (doneCount()>0 && onReset) {
       state.done = {}; saveGame(); stopMusic(); chime(); return;
     }
-    setScene('game'); chime(); return;
+    setScene('game'); startJingle(); return;
   }
   if (state.scene === 'aspiration') {
     if (state.sceneT > 1.2) { setScene('birthday'); birthdayJingle(); }
@@ -853,7 +916,7 @@ function handleTap(x, y) {
       const nv = Math.min(5, Math.max(1, state.musicVol + dir));
       if (nv !== state.musicVol) {
         state.musicVol = nv;
-        if (music) music.volume = musicVolume();
+        applyMusicVolume();
         beep(320 + nv*110, 0, 0.08, 0.10);
       }
       return;
@@ -994,6 +1057,9 @@ function updateInteraction(dt) {
     if (pp>0.25 && pp<0.75 && it.t - it.lastTick > 0.14) {
       it.lastTick = it.t; beep(90+Math.random()*40, 0, 0.1, 0.025, 'sawtooth');
     }
+  } else if (it.task.id==='nap') {
+    // slow breathing, one cycle at a time
+    if (it.t - it.lastTick > 1.7 && it.t < it.dur-0.8) { it.lastTick = it.t; snore(); }
   } else if (it.task.id==='melon') {
     const bite = Math.floor(it.t*2)%2;
     if (bite !== it.lastFrame && it.t/it.dur > 0.35) {
